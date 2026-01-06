@@ -1,0 +1,222 @@
+from telegram import (
+    Update,
+    ReplyKeyboardMarkup,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton
+)
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters
+)
+import sqlite3
+
+# ================= CONFIG =================
+BOT_TOKEN = "8522151722:AAGUK-MbECrSR_NcSUZDzxHKqiFtt3Q6gIc"
+ADMIN_ID = 7585418090  # তোমার Telegram ID
+
+# ================= DATABASE =================
+db = sqlite3.connect("bot.db", check_same_thread=False)
+sql = db.cursor()
+
+sql.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    balance INTEGER DEFAULT 0,
+    ref_by INTEGER DEFAULT 0,
+    banned INTEGER DEFAULT 0
+)
+""")
+
+sql.execute("""
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+)
+""")
+
+sql.execute("INSERT OR IGNORE INTO settings VALUES ('work_point','5')")
+sql.execute("INSERT OR IGNORE INTO settings VALUES ('min_withdraw','100')")
+sql.execute("INSERT OR IGNORE INTO settings VALUES ('force_channels','')")
+db.commit()
+
+# ================= HELPERS =================
+def get_setting(key):
+    sql.execute("SELECT value FROM settings WHERE key=?", (key,))
+    return sql.fetchone()[0]
+
+def set_setting(key, value):
+    sql.execute("UPDATE settings SET value=? WHERE key=?", (value, key))
+    db.commit()
+
+def is_admin(user_id):
+    return user_id == ADMIN_ID
+
+def get_force_channels():
+    ch = get_setting("force_channels")
+    return ch.split(",") if ch else []
+
+async def check_join(user_id, bot):
+    for ch in get_force_channels():
+        try:
+            m = await bot.get_chat_member(ch, user_id)
+            if m.status in ["left", "kicked"]:
+                return False
+        except:
+            return False
+    return True
+
+# ================= MENUS =================
+def user_menu():
+    return ReplyKeyboardMarkup(
+        [
+            ["✅ কাজ করুন", "💰 ব্যালেন্স"],
+            ["👥 রেফার", "💸 উইথড্র"],
+            ["ℹ️ নিয়ম"]
+        ],
+        resize_keyboard=True
+    )
+
+def admin_menu():
+    return ReplyKeyboardMarkup(
+        [
+            ["👑 এডমিন প্যানেল"],
+            ["📊 স্ট্যাটস", "⚙️ সেটিংস"],
+            ["⬅️ মেনু"]
+        ],
+        resize_keyboard=True
+    )
+
+# ================= START =================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    sql.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user.id,))
+    db.commit()
+
+    if not await check_join(user.id, context.bot):
+        buttons = []
+        for ch in get_force_channels():
+            buttons.append(
+                [InlineKeyboardButton(f"📢 Join {ch}", url=f"https://t.me/{ch.replace('@','')}")]
+            )
+        buttons.append([InlineKeyboardButton("✅ চেক", callback_data="check")])
+        await update.message.reply_text(
+            "🚫 বট ব্যবহার করতে হলে আগে চ্যানেল জয়েন করুন 👇",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return
+
+    await update.message.reply_text(
+        "🎉 স্বাগতম!\nকাজ করে আয় করুন 💸",
+        reply_markup=user_menu()
+    )
+
+# ================= CALLBACK =================
+async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    if q.data == "check":
+        if await check_join(q.from_user.id, context.bot):
+            await q.message.edit_text("✅ সফল! এখন /start দিন")
+        else:
+            await q.answer("❌ এখনও জয়েন করেননি", show_alert=True)
+
+# ================= USER ACTIONS =================
+async def user_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    user_id = update.effective_user.id
+
+    if text == "✅ কাজ করুন":
+        point = int(get_setting("work_point"))
+        sql.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (point, user_id))
+        db.commit()
+        await update.message.reply_text(f"✅ কাজ সম্পন্ন!\n➕ {point} পয়েন্ট যোগ হয়েছে")
+
+    elif text == "💰 ব্যালেন্স":
+        sql.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
+        bal = sql.fetchone()[0]
+        await update.message.reply_text(f"💰 আপনার ব্যালেন্স: {bal} পয়েন্ট")
+
+    elif text == "👥 রেফার":
+        link = f"https://t.me/{context.bot.username}?start={user_id}"
+        await update.message.reply_text(f"👥 রেফার লিংক:\n{link}")
+
+    elif text == "ℹ️ নিয়ম":
+        await update.message.reply_text(
+            "📜 নিয়মাবলি:\n"
+            "1️⃣ দিনে নির্দিষ্ট বার কাজ\n"
+            "2️⃣ ফেক করলে ব্যান\n"
+            "3️⃣ পেমেন্ট ম্যানুয়ালি"
+        )
+
+    elif text == "👑 এডমিন প্যানেল" and is_admin(user_id):
+        await update.message.reply_text("👑 Admin Panel", reply_markup=admin_menu())
+
+    elif text == "📊 স্ট্যাটস" and is_admin(user_id):
+        sql.execute("SELECT COUNT(*) FROM users")
+        total = sql.fetchone()[0]
+        await update.message.reply_text(f"📊 মোট ইউজার: {total}")
+
+    elif text == "⚙️ সেটিংস" and is_admin(user_id):
+        wp = get_setting("work_point")
+        mw = get_setting("min_withdraw")
+        await update.message.reply_text(
+            f"⚙️ সেটিংস:\n"
+            f"🔹 কাজের পয়েন্ট: {wp}\n"
+            f"🔹 মিনিমাম উইথড্র: {mw}\n\n"
+            "কমান্ড:\n"
+            "/set_work 10\n"
+            "/set_withdraw 200\n"
+            "/add_channel @channel\n"
+            "/remove_channel @channel"
+        )
+
+    elif text == "⬅️ মেনু":
+        await update.message.reply_text("মেনু", reply_markup=user_menu())
+
+# ================= ADMIN COMMANDS =================
+async def set_work(update, context):
+    if is_admin(update.effective_user.id):
+        set_setting("work_point", context.args[0])
+        await update.message.reply_text("✅ কাজের পয়েন্ট আপডেট")
+
+async def set_withdraw(update, context):
+    if is_admin(update.effective_user.id):
+        set_setting("min_withdraw", context.args[0])
+        await update.message.reply_text("✅ মিনিমাম উইথড্র আপডেট")
+
+async def add_channel(update, context):
+    if is_admin(update.effective_user.id):
+        ch = context.args[0]
+        channels = get_force_channels()
+        if ch not in channels:
+            channels.append(ch)
+            set_setting("force_channels", ",".join(channels))
+        await update.message.reply_text("✅ চ্যানেল যোগ হয়েছে")
+
+async def remove_channel(update, context):
+    if is_admin(update.effective_user.id):
+        ch = context.args[0]
+        channels = get_force_channels()
+        if ch in channels:
+            channels.remove(ch)
+            set_setting("force_channels", ",".join(channels))
+        await update.message.reply_text("❌ চ্যানেল রিমুভ")
+
+# ================= RUN =================
+app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CallbackQueryHandler(callback))
+app.add_handler(CommandHandler("set_work", set_work))
+app.add_handler(CommandHandler("set_withdraw", set_withdraw))
+app.add_handler(CommandHandler("add_channel", add_channel))
+app.add_handler(CommandHandler("remove_channel", remove_channel))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, user_actions))
+
+print("🔥 Professional Bot Running...")
+app.run_polling()
